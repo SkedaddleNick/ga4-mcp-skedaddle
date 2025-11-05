@@ -2,30 +2,14 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { listTools, callTool } from "../src/mcpServer.js";
 
+/* -------------------------- CORS & helpers -------------------------- */
 function setCORS(res: VercelResponse) {
-  res.setHeader("Content-Type", "application/json");
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader("Access-Control-Max-Age", "600");
 }
-
-// Turn our internal tool into a strict Actions-style action
-function toAction(t: any) {
-  const schema = t.inputSchema || t.input_schema || {};
-  return {
-    name: t.name, // underscore-only name
-    description: t.description,
-    parameters: {
-      $schema: "http://json-schema.org/draft-07/schema#",
-      type: "object",
-      additionalProperties: false,
-      properties: schema.properties ?? {},
-      required: schema.required ?? []
-    }
-  };
-}
-
 function log(prefix: string, obj: unknown) {
   try {
     const s = typeof obj === "string" ? obj : JSON.stringify(obj);
@@ -34,53 +18,87 @@ function log(prefix: string, obj: unknown) {
     console.log(prefix, "<unserializable>");
   }
 }
-
 function ok(res: VercelResponse, payload: any) {
   setCORS(res);
   return res.status(200).json(payload);
 }
-
-function normalize(method?: string) {
-  return (method || "").replace(/\./g, "/"); // tools.list -> tools/list
+function normalize(m?: string) {
+  const s = (m || "").trim().toLowerCase().replace(/\s+/g, "").replace(/\./g, "/");
+  // common aliases
+  if (s === "tools/list" || s === "actions/list" || s === "list" || s === "get/actions") return "tools/list";
+  if (s === "tools/call"  || s === "actions/call"  || s === "call" || s === "invoke")   return "tools/call";
+  return s;
+}
+function toAction(t: any) {
+  const schema = t.inputSchema || t.input_schema || {};
+  return {
+    name: t.name, // underscore-safe
+    description: t.description,
+    parameters: {
+      $schema: "http://json-schema.org/draft-07/schema#",
+      type: "object",
+      additionalProperties: false,
+      properties: schema.properties ?? {},
+      required: schema.required ?? [],
+    },
+  };
 }
 
+/* ------------------------------ Handler ------------------------------ */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === "OPTIONS") {
     setCORS(res);
     return res.status(204).send("");
   }
 
+  // Friendly GET for manual/browser checks
   if (req.method === "GET") {
-    // Friendly GET (browser probes)
-    const m = normalize((req.query?.method as string) || "");
-    if (m === "tools/list") {
-      const actions = listTools().map(toAction);
-      log("GET tools/list -> actions:", actions);
+    const method = normalize((req.query?.method as string) || "");
+    const actions = listTools().map(toAction);
+    if (method === "tools/list" || method === "") {
+      log("GET list -> actions:", actions);
       return ok(res, { actions });
     }
-    return ok(res, {
-      mcp: true,
-      message:
-        'POST {"method":"tools.list"} or {"method":"tools.call","name":"...","arguments":{...}}'
-    });
+    log("GET unknown -> actions:", { method, count: actions.length });
+    return ok(res, { actions });
   }
 
   if (req.method === "POST") {
     try {
       const raw = typeof req.body === "string" ? JSON.parse(req.body) : (req.body ?? {});
       log("POST body:", raw);
+
       const jsonrpc = typeof (raw as any).jsonrpc === "string" ? (raw as any).jsonrpc : undefined;
       const id = (raw as any).id;
-      const methodOriginal = (raw as any).method;
-      const method = normalize(methodOriginal);
+      const origMethod = (raw as any).method;
+      const method = normalize(origMethod);
 
-      if (method === "tools/list") {
-        const actions = listTools().map(toAction);
-        const payload = jsonrpc ? { jsonrpc, id, result: { actions } } : { actions };
-        log("REPLY tools.list:", payload);
+      /* -------- MCP handshake: initialize -------- */
+      if (method === "initialize") {
+        // Respond OK and advertise capabilities so client continues
+        const result = {
+          protocolVersion: (raw as any)?.params?.protocolVersion ?? "2025-01-01",
+          serverInfo: { name: "ga4-mcp", version: "1.0.0" },
+          capabilities: {
+            // advertise both so various clients proceed
+            tools:   { list: true, call: true },
+            actions: { list: true, call: true },
+          },
+        };
+        const payload = jsonrpc ? { jsonrpc, id, result } : result;
+        log("REPLY initialize:", payload);
         return ok(res, payload);
       }
 
+      /* -------------------- List actions/tools -------------------- */
+      if (method === "tools/list") {
+        const actions = listTools().map(toAction);
+        const payload = jsonrpc ? { jsonrpc, id, result: { actions } } : { actions };
+        log("REPLY list:", payload);
+        return ok(res, payload);
+      }
+
+      /* ------------------------ Call tool ------------------------- */
       if (method === "tools/call") {
         const name =
           (raw as any).name ??
@@ -96,19 +114,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           const payload = jsonrpc
             ? { jsonrpc, id, error: { code: -32602, message: "Missing tool name" } }
             : { error: "Missing tool name" };
-          log("REPLY tools.call (missing name):", payload);
+          log("REPLY call (missing name):", payload);
           return ok(res, payload);
         }
         const result = await callTool(name, args);
         const payload = jsonrpc ? { jsonrpc, id, result } : result;
-        log("REPLY tools.call:", payload);
+        log("REPLY call:", payload);
         return ok(res, payload);
       }
 
+      /* -------- Fallback: if unknown, still hand back actions ----- */
+      const actions = listTools().map(toAction);
       const payload = jsonrpc
-        ? { jsonrpc, id, error: { code: -32601, message: `Unsupported method: ${methodOriginal}` } }
-        : { error: `Unsupported method: ${methodOriginal}` };
-      log("REPLY unsupported:", payload);
+        ? { jsonrpc, id, result: { actions, note: `fallback for method: ${origMethod}` } }
+        : { actions, note: `fallback for method: ${origMethod}` };
+      log("REPLY fallback:", payload);
       return ok(res, payload);
     } catch (e: any) {
       console.error("Handler error:", e?.message || e);
