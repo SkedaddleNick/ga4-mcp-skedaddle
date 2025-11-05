@@ -147,5 +147,51 @@ tools["ga4_run_report"] = {
       returnPropertyQuota: args.includeQuota,
     };
     if (args.orderByMetric) {
-      request.orderBys = [{]()
+      request.orderBys = [{ metric: { metricName: args.orderByMetric }, desc: args.orderDescending }];
+    }
+    if (args.filterExpression) request.dimensionFilter = args.filterExpression;
+    const [resp] = await ga4.runReport(request);
+    const headers = [
+      ...(resp.dimensionHeaders?.map((h) => ({ type: "dimension", name: h.name })) ?? []),
+      ...(resp.metricHeaders?.map((h) => ({ type: "metric", name: h.name })) ?? []),
+    ];
+    const rows =
+      resp.rows?.map((r) => [
+        ...(r.dimensionValues ?? []).map((v) => v.value),
+        ...(r.metricValues ?? []).map((v) => v.value),
+      ]) ?? [];
+    return {
+      content: [{ type: "text", text: `Returned ${rows.length} rows.` }],
+      structuredContent: {
+        headers, rows, rowCount: rows.length,
+        sampled: resp.rowCount !== undefined && rows.length < Number(resp.rowCount),
+        quota: resp.propertyQuota ?? null
+      }
+    };
+  },
+};
 
+/* --------------------------- Exports for the route --------------------------- */
+export function listTools() {
+  return Object.values(tools).map((t) => ({
+    name: t.name,
+    description: t.description,
+    title: t.title,
+    inputSchema: t.inputSchema,
+    input_schema: t.inputSchema,
+    parameters: {
+      type: "object",
+      properties: t.inputSchema.properties || {},
+      required: t.inputSchema.required || [],
+      additionalProperties: false
+    }
+  }));
+}
+export async function callTool(name: string, args: any) {
+  // support legacy names with dots by aliasing them to underscores
+  const normalized = (name as string).replace(/\./g, "_");
+  const t = tools[normalized];
+  if (!t) throw new Error(`Unknown tool: ${name}`);
+  const parsed = t.validate ? t.validate(args) : args;
+  return await t.run(parsed);
+}
