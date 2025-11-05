@@ -9,6 +9,27 @@ function setCORS(res: VercelResponse) {
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
 }
 
+function withAliases(t: any) {
+  // Provide aliases for maximum compatibility:
+  // - inputSchema (camel)
+  // - input_schema (snake)
+  // - parameters (Actions-style)
+  const schema = t.inputSchema || t.input_schema || {};
+  return {
+    name: t.name,
+    title: t.title,
+    description: t.description,
+    inputSchema: schema,
+    input_schema: schema,
+    parameters: {
+      type: "object",
+      properties: schema?.properties ?? {},
+      required: schema?.required ?? [],
+      additionalProperties: false
+    }
+  };
+}
+
 function ok(res: VercelResponse, payload: any, id?: any, jsonrpc?: string) {
   setCORS(res);
   if (jsonrpc) return res.status(200).json({ jsonrpc, id, result: payload });
@@ -16,15 +37,14 @@ function ok(res: VercelResponse, payload: any, id?: any, jsonrpc?: string) {
 }
 function err(res: VercelResponse, message: string, id?: any, jsonrpc?: string, code = -32601) {
   setCORS(res);
-  // If the client is JSON-RPC, errors must be 200 with an error envelope
   if (jsonrpc) return res.status(200).json({ jsonrpc, id, error: { code, message } });
   return res.status(500).json({ error: message });
 }
 
-// Normalize method names: accept dots or slashes
+// Accept both dots and slashes (tools.list | tools/list)
 function normalize(method?: string) {
   if (!method) return "";
-  return method.replace(/\./g, "/"); // "tools.list" -> "tools/list"
+  return method.replace(/\./g, "/");
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -36,14 +56,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === "GET") {
     const m = normalize((req.query?.method as string) || "");
     if (m === "tools/list") {
-      const tools = listTools();
+      const tools = listTools().map(withAliases);
       return ok(res, { tools });
     }
     return ok(res, {
       mcp: true,
       message:
         'POST with {"method":"tools/list"} or {"method":"tools/call","name":"...","arguments":{...}} (JSON-RPC accepted).',
-      endpoints: { list: "tools/list|tools.list", call: "tools/call|tools.call" },
+      endpoints: { list: "tools/list|tools.list", call: "tools/call|tools.call" }
     });
   }
 
@@ -55,23 +75,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const method = normalize(raw.method);
 
       if (method === "tools/list") {
-        const tools = listTools();
+        const tools = listTools().map(withAliases);
         return ok(res, { tools }, id, jsonrpc);
       }
 
       if (method === "tools/call") {
         // Be flexible about param shapes
-        const name =
-          raw.name ??
-          raw.tool_name ??
-          raw.params?.name ??
-          raw.params?.tool_name;
-        const args =
-          raw.arguments ??
-          raw.params?.arguments ??
-          raw.args ??
-          {};
-
+        const name = raw.name ?? raw.tool_name ?? raw.params?.name ?? raw.params?.tool_name;
+        const args = raw.arguments ?? raw.params?.arguments ?? raw.args ?? {};
         if (!name) return err(res, "Missing tool name", id, jsonrpc, -32602);
         const result = await callTool(name, args);
         return ok(res, result, id, jsonrpc);
