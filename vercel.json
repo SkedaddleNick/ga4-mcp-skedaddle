@@ -1,0 +1,12 @@
+{
+  "functions": {
+    "api/mcp.ts": {
+      "runtime": "nodejs18.x",
+      "memory": 512,
+      "maxDuration": 30
+    }
+  },
+  "routes": [
+    { "src": "/", "dest": "/api/mcp" }
+  ]
+}
