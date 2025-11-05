@@ -1,12 +1,10 @@
 {
+  "version": 2,
   "functions": {
-    "api/mcp.ts": {
-      "runtime": "vercel-node@20.0.0",
+    "api/*.ts": {
+      "runtime": "nodejs20.x",
       "memory": 512,
       "maxDuration": 30
     }
-  },
-  "routes": [
-    { "src": "/", "dest": "/api/mcp" }
-  ]
+  }
 }
