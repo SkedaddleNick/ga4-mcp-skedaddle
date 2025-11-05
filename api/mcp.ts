@@ -3,30 +3,32 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { listTools, callTool } from "../src/mcpServer.js";
 
 function setCORS(res: VercelResponse) {
-  res.setHeader("Content-Type", "application/json");
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  res.setHeader("Access-Control-Max-Age", "600");
 }
 
-function withAliases(t: any) {
-  // Provide aliases for maximum compatibility:
-  // - inputSchema (camel)
-  // - input_schema (snake)
-  // - parameters (Actions-style)
+function toCompatTool(t: any) {
+  // Provide ALL shapes some clients look for
   const schema = t.inputSchema || t.input_schema || {};
   return {
     name: t.name,
     title: t.title,
     description: t.description,
+
+    // MCP-ish
     inputSchema: schema,
     input_schema: schema,
+
+    // Actions-style
     parameters: {
       type: "object",
-      properties: schema?.properties ?? {},
-      required: schema?.required ?? [],
-      additionalProperties: false
-    }
+      properties: schema.properties ?? {},
+      required: schema.required ?? [],
+      additionalProperties: false,
+    },
   };
 }
 
@@ -41,10 +43,8 @@ function err(res: VercelResponse, message: string, id?: any, jsonrpc?: string, c
   return res.status(500).json({ error: message });
 }
 
-// Accept both dots and slashes (tools.list | tools/list)
 function normalize(method?: string) {
-  if (!method) return "";
-  return method.replace(/\./g, "/");
+  return (method || "").replace(/\./g, "/"); // tools.list -> tools/list
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -56,14 +56,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === "GET") {
     const m = normalize((req.query?.method as string) || "");
     if (m === "tools/list") {
-      const tools = listTools().map(withAliases);
-      return ok(res, { tools });
+      const tools = listTools().map(toCompatTool);
+      // Return tools AND actions for maximum compatibility
+      return ok(res, { schema_version: "v1", tools, actions: tools });
     }
     return ok(res, {
       mcp: true,
       message:
-        'POST with {"method":"tools/list"} or {"method":"tools/call","name":"...","arguments":{...}} (JSON-RPC accepted).',
-      endpoints: { list: "tools/list|tools.list", call: "tools/call|tools.call" }
+        'POST {"method":"tools/list"} or {"method":"tools/call","name":"...","arguments":{...}} (JSON-RPC accepted).',
+      endpoints: { list: "tools/list|tools.list", call: "tools/call|tools.call" },
     });
   }
 
@@ -75,13 +76,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const method = normalize(raw.method);
 
       if (method === "tools/list") {
-        const tools = listTools().map(withAliases);
-        return ok(res, { tools }, id, jsonrpc);
+        const tools = listTools().map(toCompatTool);
+        return ok(res, { schema_version: "v1", tools, actions: tools }, id, jsonrpc);
       }
 
       if (method === "tools/call") {
-        // Be flexible about param shapes
-        const name = raw.name ?? raw.tool_name ?? raw.params?.name ?? raw.params?.tool_name;
+        const name =
+          raw.name ?? raw.tool_name ?? raw.params?.name ?? raw.params?.tool_name;
         const args = raw.arguments ?? raw.params?.arguments ?? raw.args ?? {};
         if (!name) return err(res, "Missing tool name", id, jsonrpc, -32602);
         const result = await callTool(name, args);
