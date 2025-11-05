@@ -93,4 +93,31 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           (raw as any).args ??
           {};
         if (!name) {
-          const payload =
+          const payload = jsonrpc
+            ? { jsonrpc, id, error: { code: -32602, message: "Missing tool name" } }
+            : { error: "Missing tool name" };
+          log("REPLY tools.call (missing name):", payload);
+          return ok(res, payload);
+        }
+        const result = await callTool(name, args);
+        const payload = jsonrpc ? { jsonrpc, id, result } : result;
+        log("REPLY tools.call:", payload);
+        return ok(res, payload);
+      }
+
+      const payload = jsonrpc
+        ? { jsonrpc, id, error: { code: -32601, message: `Unsupported method: ${methodOriginal}` } }
+        : { error: `Unsupported method: ${methodOriginal}` };
+      log("REPLY unsupported:", payload);
+      return ok(res, payload);
+    } catch (e: any) {
+      console.error("Handler error:", e?.message || e);
+      setCORS(res);
+      return res.status(500).json({ error: e?.message || "Internal Server Error" });
+    }
+  }
+
+  setCORS(res);
+  res.setHeader("Allow", "POST, GET, OPTIONS");
+  return res.status(405).json({ error: "Method Not Allowed" });
+}
