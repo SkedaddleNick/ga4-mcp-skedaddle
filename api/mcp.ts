@@ -18,21 +18,19 @@ function log(prefix: string, obj: unknown) {
     console.log(prefix, "<unserializable>");
   }
 }
-function ok(res: VercelResponse, payload: any) {
-  setCORS(res);
-  return res.status(200).json(payload);
-}
+function ok(res: VercelResponse, payload: any) { setCORS(res); return res.status(200).json(payload); }
 function normalize(m?: string) {
   const s = (m || "").trim().toLowerCase().replace(/\s+/g, "").replace(/\./g, "/");
-  // common aliases
   if (s === "tools/list" || s === "actions/list" || s === "list" || s === "get/actions") return "tools/list";
   if (s === "tools/call"  || s === "actions/call"  || s === "call" || s === "invoke")   return "tools/call";
   return s;
 }
+
+/* -------------------------- adapters -------------------------- */
 function toAction(t: any) {
   const schema = t.inputSchema || t.input_schema || {};
   return {
-    name: t.name, // underscore-safe
+    name: t.name,
     description: t.description,
     parameters: {
       $schema: "http://json-schema.org/draft-07/schema#",
@@ -43,24 +41,25 @@ function toAction(t: any) {
     },
   };
 }
+function toTool(t: any) {
+  const schema = t.inputSchema || t.input_schema || {};
+  return {
+    name: t.name,
+    description: t.description,
+    inputSchema: schema,
+    input_schema: schema, // alias for some clients
+  };
+}
 
 /* ------------------------------ Handler ------------------------------ */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method === "OPTIONS") {
-    setCORS(res);
-    return res.status(204).send("");
-  }
+  if (req.method === "OPTIONS") { setCORS(res); return res.status(204).send(""); }
 
-  // Friendly GET for manual/browser checks
+  // helpful GET for manual checks
   if (req.method === "GET") {
-    const method = normalize((req.query?.method as string) || "");
     const actions = listTools().map(toAction);
-    if (method === "tools/list" || method === "") {
-      log("GET list -> actions:", actions);
-      return ok(res, { actions });
-    }
-    log("GET unknown -> actions:", { method, count: actions.length });
-    return ok(res, { actions });
+    log("GET tools/list -> actions:", actions);
+    return ok(res, { schema_version: "v1", actions, tools: listTools().map(toTool) });
   }
 
   if (req.method === "POST") {
@@ -73,47 +72,45 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const origMethod = (raw as any).method;
       const method = normalize(origMethod);
 
-      /* -------- MCP handshake: initialize -------- */
+      // 1) MCP handshake
       if (method === "initialize") {
-        // Respond OK and advertise capabilities so client continues
         const result = {
           protocolVersion: (raw as any)?.params?.protocolVersion ?? "2025-01-01",
           serverInfo: { name: "ga4-mcp", version: "1.0.0" },
-          capabilities: {
-            // advertise both so various clients proceed
-            tools:   { list: true, call: true },
-            actions: { list: true, call: true },
-          },
+          capabilities: { tools: { list: true, call: true }, actions: { list: true, call: true } },
         };
         const payload = jsonrpc ? { jsonrpc, id, result } : result;
         log("REPLY initialize:", payload);
         return ok(res, payload);
       }
 
-      /* -------------------- List actions/tools -------------------- */
+      // 2) Some clients send this right after initialize; respond with empty success
+      if (method === "notifications/initialized") {
+        const payload = jsonrpc ? { jsonrpc, id, result: {} } : {};
+        log("REPLY notifications/initialized:", payload);
+        return ok(res, payload);
+      }
+
+      // 3) List actions/tools
       if (method === "tools/list") {
         const actions = listTools().map(toAction);
-        const payload = jsonrpc ? { jsonrpc, id, result: { actions } } : { actions };
+        const tools = listTools().map(toTool);
+        const result = { schema_version: "v1", actions, tools };
+        const payload = jsonrpc ? { jsonrpc, id, result } : result;
         log("REPLY list:", payload);
         return ok(res, payload);
       }
 
-      /* ------------------------ Call tool ------------------------- */
+      // 4) Call tool
       if (method === "tools/call") {
         const name =
-          (raw as any).name ??
-          (raw as any).tool_name ??
-          (raw as any).params?.name ??
-          (raw as any).params?.tool_name;
+          (raw as any).name ?? (raw as any).tool_name ??
+          (raw as any).params?.name ?? (raw as any).params?.tool_name;
         const args =
-          (raw as any).arguments ??
-          (raw as any).params?.arguments ??
-          (raw as any).args ??
-          {};
+          (raw as any).arguments ?? (raw as any).params?.arguments ?? (raw as any).args ?? {};
         if (!name) {
-          const payload = jsonrpc
-            ? { jsonrpc, id, error: { code: -32602, message: "Missing tool name" } }
-            : { error: "Missing tool name" };
+          const payload = jsonrpc ? { jsonrpc, id, error: { code: -32602, message: "Missing tool name" } }
+                                  : { error: "Missing tool name" };
           log("REPLY call (missing name):", payload);
           return ok(res, payload);
         }
@@ -123,11 +120,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return ok(res, payload);
       }
 
-      /* -------- Fallback: if unknown, still hand back actions ----- */
+      // 5) Fallback: return actions/tools so the client can still build
       const actions = listTools().map(toAction);
-      const payload = jsonrpc
-        ? { jsonrpc, id, result: { actions, note: `fallback for method: ${origMethod}` } }
-        : { actions, note: `fallback for method: ${origMethod}` };
+      const tools = listTools().map(toTool);
+      const result = { schema_version: "v1", actions, tools, note: `fallback for method: ${origMethod}` };
+      const payload = jsonrpc ? { jsonrpc, id, result } : result;
       log("REPLY fallback:", payload);
       return ok(res, payload);
     } catch (e: any) {
